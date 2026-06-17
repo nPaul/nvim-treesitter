@@ -213,6 +213,61 @@ local function do_generate(logger, repo, compile_location)
     return logger:error('Error during "tree-sitter generate": %s', r.stderr)
   end
 end
+local function do_download_git(logger, url, project_name, cache_dir, revision, output_dir)
+  local tmp_clone = fs.joinpath(cache_dir, project_name .. '.clone.tmp')
+
+  rmpath(tmp_clone)
+  a.schedule()
+
+  -- Clean up any existing output directory
+  rmpath(output_dir)
+  a.schedule()
+
+  do -- Git clone
+    logger:info('Cloning %s (revision: %s)...', project_name, revision)
+    local clone_cmd = {
+      'git',
+      'clone',
+      '--no-checkout', -- we'll checkout specific revision after clone
+      url,
+      tmp_clone,
+    }
+    local r = system(clone_cmd)
+    if r.code > 0 then
+      return logger:error('Error during git clone: %s', r.stderr)
+    end
+  end
+
+  do -- Checkout desired revision
+    logger:debug('Checking out revision %s...', revision)
+    local checkout_cmd = { 'git', '-C', tmp_clone, 'checkout', revision }
+    local r = system(checkout_cmd)
+    if r.code > 0 then
+      return logger:error('Error during git checkout: %s', r.stderr)
+    end
+  end
+
+  do -- Remove .git directory to save space
+    local git_dir = fs.joinpath(tmp_clone, '.git')
+    logger:debug('Removing .git directory: %s', git_dir)
+    local err = rmpath(git_dir)
+    a.schedule()
+    if err then
+      return logger:error('Could not remove .git directory: %s', err)
+    end
+  end
+
+  do -- Move tmp_clone to output_dir
+    logger:debug('Moving %s to %s...', tmp_clone, output_dir)
+    local err = uv_rename(tmp_clone, output_dir)
+    a.schedule()
+    if err then
+      return logger:error('Could not rename temp clone to output dir: %s', err)
+    end
+  end
+
+  logger:info('Successfully downloaded %s to %s', project_name, output_dir)
+end
 
 ---@async
 ---@param logger Logger
@@ -222,7 +277,7 @@ end
 ---@param revision string
 ---@param output_dir string
 ---@return string? err
-local function do_download(logger, url, project_name, cache_dir, revision, output_dir)
+local function do_download_curl(logger, url, project_name, cache_dir, revision, output_dir)
   local tmp = output_dir .. '-tmp'
 
   rmpath(tmp)
@@ -390,7 +445,14 @@ local function try_install_lang(lang, cache_dir, install_dir, generate)
 
       revision = revision or repo.branch or 'main'
 
-      local err = do_download(logger, repo.url, project_name, cache_dir, revision, project_dir)
+      if true then
+        local err =
+          do_download_git(logger, repo.url, project_name, cache_dir, revision, project_dir)
+      else
+        local err =
+          do_download_curl(logger, repo.url, project_name, cache_dir, revision, project_dir)
+      end
+
       if err then
         return err
       end
@@ -519,7 +581,7 @@ local function install(languages, options)
   local tasks = {} ---@type async.TaskFun[]
   local done = 0
   for _, lang in ipairs(languages) do
-    tasks[#tasks + 1] = a.async(--[[@async]] function()
+    tasks[#tasks + 1] = a.async( --[[@async]] function()
       a.schedule()
       local success = install_lang(lang, cache_dir, install_dir, options.force, options.generate)
       if success then
@@ -628,7 +690,7 @@ M.uninstall = a.async(function(languages, options)
     else
       local parser = fs.joinpath(parser_dir, lang) .. '.so'
       local queries = fs.joinpath(query_dir, lang)
-      tasks[#tasks + 1] = a.async(--[[@async]] function()
+      tasks[#tasks + 1] = a.async( --[[@async]] function()
         local err = uninstall_lang(logger, lang, parser, queries)
         if not err then
           done = done + 1
