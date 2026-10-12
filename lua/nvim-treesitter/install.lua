@@ -300,6 +300,69 @@ end
 
 ---@async
 ---@param logger Logger
+---@param url string
+---@param project_name string
+---@param cache_dir string
+---@param revision string
+---@param output_dir string
+---@return string? err
+local function do_download_git(logger, url, project_name, cache_dir, revision, output_dir)
+  local tmp_clone = fs.joinpath(cache_dir, project_name .. '.clone.tmp')
+
+  rmpath(tmp_clone)
+  a.schedule()
+
+  rmpath(output_dir)
+  a.schedule()
+
+  do -- Git clone
+    logger:info('Cloning %s (revision: %s)...', project_name, revision)
+    local clone_cmd = {
+      'git',
+      'clone',
+      '--no-checkout',
+      url,
+      tmp_clone,
+    }
+    local r = system(clone_cmd)
+    if r.code > 0 then
+      return logger:error('Error during git clone: %s', r.stderr)
+    end
+  end
+
+  do -- Checkout desired revision
+    logger:debug('Checking out revision %s...', revision)
+    local checkout_cmd = { 'git', '-C', tmp_clone, 'checkout', revision }
+    local r = system(checkout_cmd)
+    if r.code > 0 then
+      return logger:error('Error during git checkout: %s', r.stderr)
+    end
+  end
+
+  do -- Remove .git directory
+    local git_dir = fs.joinpath(tmp_clone, '.git')
+    logger:debug('Removing .git directory: %s', git_dir)
+    local err = rmpath(git_dir)
+    a.schedule()
+    if err then
+      return logger:error('Could not remove .git directory: %s', err)
+    end
+  end
+
+  do -- Move tmp_clone to output_dir
+    logger:debug('Moving %s to %s...', tmp_clone, output_dir)
+    local err = uv_rename(tmp_clone, output_dir)
+    a.schedule()
+    if err then
+      return logger:error('Could not rename temp clone to output dir: %s', err)
+    end
+  end
+
+  logger:info('Successfully downloaded %s to %s', project_name, output_dir)
+end
+
+---@async
+---@param logger Logger
 ---@param compile_location string
 ---@return string? err
 local function do_compile(logger, compile_location)
@@ -390,7 +453,8 @@ local function try_install_lang(lang, cache_dir, install_dir, generate)
 
       revision = revision or repo.branch or 'main'
 
-      local err = do_download(logger, repo.url, project_name, cache_dir, revision, project_dir)
+      -- local err = do_download(logger, repo.url, project_name, cache_dir, revision, project_dir)
+      local err = do_download_git(logger, repo.url, project_name, cache_dir, revision, project_dir)
       if err then
         return err
       end
